@@ -1,0 +1,42 @@
+{
+  "name": "dynafetch-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "overrides": {
+    "@asamuzakjp/css-color": "4.1.1"
+  },
+  "scripts": {
+    "net": "cd packages/dynafetch-net && go run .",
+    "phantom": "tsx src/phantom/index.ts",
+    "typecheck": "npx tsc --noEmit",
+    "release": "./scripts/release.sh",
+    "release:patch": "./scripts/release.sh patch",
+    "release:minor": "./scripts/release.sh minor",
+    "release:major": "./scripts/release.sh major"
+  },
+  "dependencies": {
+    "@babel/core": "^7.29.0",
+    "@babel/generator": "^7.29.1",
+    "@babel/parser": "^7.29.0",
+    "@babel/traverse": "^7.29.0",
+    "@babel/types": "^7.29.0",
+    "chalk": "^5.6.2",
+    "cheerio": "^1.2.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "27.0.0",
+    "tsx": "^4.21.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/babel__core": "^7.20.5",
+    "@types/babel__generator": "^7.27.0",
+    "@types/babel__traverse": "^7.28.0",
+    "@types/jsdom": "^27.0.0",
+    "@types/node": "^20",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5"
+  }
+}

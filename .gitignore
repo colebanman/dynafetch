@@ -1,0 +1,39 @@
+# dependencies
+/node_modules
+
+# build
+/dist
+/build
+/.next/
+
+# misc
+.DS_Store
+*.pem
+*.exe
+*.dll
+*.so
+*.dylib
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+
+# env / secrets
+.env
+.env.*
+proxies.txt
+packages/dynafetch-net/phantom-proxy
+packages/dynafetch-net/dynafetch-net
+
+# typescript
+*.tsbuildinfo
+
+# editor
+.idea
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Go
+go.work
+go.work.sum
