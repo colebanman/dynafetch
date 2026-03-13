@@ -1,6 +1,6 @@
 {
   "name": "@grabbit-labs/dynafetch",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Fetch any website like a real browser. Chrome TLS fingerprinting, JS execution, and request interception in one function call.",
   "type": "module",
   "main": "./src/index.ts",
