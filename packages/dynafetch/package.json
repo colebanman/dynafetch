@@ -17,6 +17,10 @@
     "spa",
     "headless"
   ],
+  "files": [
+    "src",
+    "README.md"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
