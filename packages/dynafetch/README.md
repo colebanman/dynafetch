@@ -2,10 +2,10 @@
 
 Fetch any website like a real browser. One function call.
 
-dynafetch emulates Chrome at the network level — TLS fingerprinting, header ordering, JavaScript execution, and full request interception — so you get the same HTML and data a real user would see.
+dynafetch provides Chrome-level TLS fingerprinting, JavaScript execution, and full network interception. The response includes fully rendered HTML and all captured requests.
 
 ```ts
-import { dynafetch } from "dynafetch";
+import { dynafetch } from "@grabbit-labs/dynafetch";
 
 const page = await dynafetch("https://example.com");
 console.log(page.html);       // fully rendered HTML
@@ -13,28 +13,26 @@ console.log(page.framework);  // "nextjs", "inertia", "nuxt", ...
 console.log(page.status);     // 200
 ```
 
-## Why dynafetch?
+## Features
 
-Most scrapers either get blocked by bot protection or miss data that loads via JavaScript. dynafetch solves both:
-
-- **Chrome TLS fingerprint** — indistinguishable from a real browser at the network layer
-- **Full JS execution** — SPAs, client-rendered content, lazy-loaded data all work
-- **Request interception** — every `fetch()`, XHR, and WebSocket the page makes is captured
-- **Framework detection** — automatically identifies Next.js, Nuxt, Inertia, Remix, Astro, SvelteKit, and more
-- **Fast** — parallel module resolution and batch network calls. A complex Vite app with 700+ modules renders in under 5 seconds
+- **Chrome TLS fingerprint**: indistinguishable from a real browser at the network layer
+- **Full JS execution**: SPAs, client-rendered content, and lazy-loaded data
+- **Request interception**: captures every `fetch()`, XHR, and WebSocket call
+- **Framework detection**: identifies Next.js, Nuxt, Inertia, Remix, Astro, SvelteKit, and more
+- **Performance**: parallel module resolution and batch network calls; 700+ module Vite apps render in under 5 seconds
 
 ## Hyper-Proxying
 
-dynafetch doesn't just support proxies — it lets you choose exactly which requests go through them.
+Route specific request types through your proxy while letting others connect directly. This reduces proxy bandwidth and latency for requests that don't need it.
 
 ```ts
-// Proxy everything
+// Proxy all requests
 const page = await dynafetch({
   url: "https://example.com",
   proxy: "http://user:pass@ip:port",
 });
 
-// Only proxy the page and API calls — save bandwidth on static assets
+// Only proxy the page fetch and API calls, not static assets
 const page = await dynafetch({
   url: "https://example.com",
   proxy: {
@@ -44,19 +42,15 @@ const page = await dynafetch({
 });
 ```
 
-Three scopes you can mix and match:
-
-| Scope | What it covers |
+| Scope | Covers |
 |-|-|
-| `"page"` | The initial HTML document fetch |
-| `"api"` | `fetch()` and XHR calls made by page scripts |
+| `"page"` | Initial HTML document fetch |
+| `"api"` | `fetch()` and XHR calls from page scripts |
 | `"assets"` | JS scripts, ES modules, static resources |
 
-Use `"page"` and `"api"` to protect the requests that actually get blocked, while letting static CDN assets load directly.
+## Headers and cookies
 
-## Custom headers and cookies
-
-Chrome 146 headers are used by default. Anything you set merges on top — your values override the defaults, everything else stays.
+Chrome 146 headers are included by default. Custom headers merge on top; your values override the defaults, everything else is preserved.
 
 ```ts
 const page = await dynafetch({
@@ -66,19 +60,19 @@ const page = await dynafetch({
 });
 ```
 
-## Tuning speed
+## Quiescence tuning
 
-dynafetch waits for the page to "settle" — all async requests finish, then a quiet period confirms nothing else is coming. You can tune this:
+dynafetch waits for async network activity to complete before returning. These options control that behavior:
 
 ```ts
-// Fast — return as soon as possible
+// Return quickly
 const page = await dynafetch({
   url: "https://example.com",
   maxWaitMs: 1000,
   idleWaitMs: 50,
 });
 
-// Thorough — wait longer for slow APIs
+// Wait longer for slow endpoints
 const page = await dynafetch({
   url: "https://example.com",
   maxWaitMs: 5000,
@@ -86,23 +80,23 @@ const page = await dynafetch({
 });
 ```
 
-| Option | Default | What it does |
+| Option | Default | Description |
 |-|-|-|
-| `minWaitMs` | `75` | Min ms before checking if idle |
-| `idleWaitMs` | `100` | Ms of silence before considering settled |
-| `maxWaitMs` | `2000` | Hard cap — return regardless of activity |
+| `minWaitMs` | `75` | Minimum ms before checking idle state |
+| `idleWaitMs` | `100` | Ms of zero pending requests to consider settled |
+| `maxWaitMs` | `2000` | Hard cap on wait time |
 | `moduleWaitMs` | `6000` | Max wait for ES module bundling |
 | `timeoutMs` | none | Overall operation timeout |
 
-## How it works
+## Architecture
 
-1. **Harvest** — fetches the HTML through a Go-based TLS client that impersonates Chrome's exact handshake. Parses scripts, modulepreloads, and SSR state.
+1. **Harvest**: fetches the HTML document through a Go-based TLS client matching Chrome's handshake. Parses scripts, modulepreloads, and SSR state.
 
-2. **Module graph resolution** — recursively discovers and batch-fetches the entire JS dependency tree in parallel. 700+ modules resolve in ~5 batch rounds instead of 700 sequential requests.
+2. **Module graph resolution**: recursively discovers and batch-fetches the full JS dependency tree in parallel. 700+ modules resolve in approximately 5 batch rounds.
 
-3. **Execute** — runs scripts in a sandboxed environment with full browser API shims. Every network call is intercepted and routed through the TLS proxy.
+3. **Execute**: runs scripts in a sandboxed environment with browser API shims. All network calls are intercepted and routed through the TLS proxy.
 
-4. **Settle** — waits for async activity to complete, then returns rendered HTML, framework metadata, and timing breakdown.
+4. **Settle**: waits for async activity to complete, then returns rendered HTML, framework metadata, and timing breakdown.
 
 ## Requirements
 
