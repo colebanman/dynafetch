@@ -1,10 +1,12 @@
 import { build } from "esbuild";
-import { cpSync, mkdirSync } from "fs";
+import { mkdirSync, chmodSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { execSync } from "child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "../..");
+const goSrc = resolve(root, "packages/dynafetch-net");
 
 // Bundle everything into one JS file
 await build({
@@ -15,7 +17,6 @@ await build({
   format: "esm",
   outfile: resolve(__dirname, "dist/index.js"),
   sourcemap: true,
-  // Keep node builtins and npm dependencies external
   external: [
     "node:*",
     "cheerio",
@@ -29,7 +30,6 @@ await build({
     "@babel/types",
     "crypto",
   ],
-  // Replace __dirname in the bundle with a runtime reference
   define: {
     "__bundled_package": "true",
   },
@@ -38,10 +38,25 @@ await build({
   },
 });
 
-// Copy precompiled binaries
-const binSrc = resolve(root, "packages/dynafetch-net/bin");
-const binDst = resolve(__dirname, "bin");
-mkdirSync(binDst, { recursive: true });
-cpSync(binSrc, binDst, { recursive: true });
+// Cross-compile Go binaries directly into the package bin/ directory.
+const binDir = resolve(__dirname, "bin");
+mkdirSync(binDir, { recursive: true });
+
+const targets = [
+  { goos: "darwin", goarch: "arm64", name: "dynafetch-net-darwin-arm64" },
+  { goos: "darwin", goarch: "amd64", name: "dynafetch-net-darwin-x64" },
+  { goos: "linux",  goarch: "amd64", name: "dynafetch-net-linux-x64" },
+  { goos: "linux",  goarch: "arm64", name: "dynafetch-net-linux-arm64" },
+  { goos: "windows", goarch: "amd64", name: "dynafetch-net-win32-x64.exe" },
+];
+
+for (const t of targets) {
+  const out = resolve(binDir, t.name);
+  execSync(`GOOS=${t.goos} GOARCH=${t.goarch} CGO_ENABLED=0 go build -ldflags="-s -w" -o ${out} .`, {
+    cwd: goSrc,
+    stdio: "inherit",
+  });
+  try { chmodSync(out, 0o755); } catch {}
+}
 
 console.log("Build complete: dist/index.js + bin/");

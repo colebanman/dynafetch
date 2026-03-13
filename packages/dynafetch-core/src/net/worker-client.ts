@@ -45,6 +45,10 @@ type WorkerSessionOptions = {
 type WorkerTransportState = {
   child: ChildProcessWithoutNullStreams;
   pending: Map<string, PendingRequest>;
+  updateRef: () => void;
+  holdCount: number;
+  hold: () => void;
+  release: () => void;
 };
 
 const sessionStore = new AsyncLocalStorage<{ sessionId: string }>();
@@ -114,6 +118,31 @@ function createWorkerTransport(): Promise<WorkerTransportState> {
   }
 
   const pending = new Map<string, PendingRequest>();
+
+  // Ref/unref the child based on whether there are pending requests.
+  // When pending is empty, unref so Node can exit. When requests are
+  // in flight, ref so the child stays alive until they complete.
+  let holdCount = 0;
+  const updateRef = () => {
+    if (pending.size === 0 && holdCount === 0) {
+      child.unref();
+      (child.stdin as any).unref?.();
+      (child.stdout as any).unref?.();
+      (child.stderr as any).unref?.();
+    } else {
+      child.ref();
+      (child.stdin as any).ref?.();
+      (child.stdout as any).ref?.();
+      (child.stderr as any).ref?.();
+    }
+  };
+  const hold = () => { holdCount++; updateRef(); };
+  const release = () => { holdCount = Math.max(0, holdCount - 1); updateRef(); };
+  // Absorb EPIPE errors on stdin during shutdown
+  child.stdin.on("error", () => {});
+
+  // Start unref'd — no requests yet
+  updateRef();
   const rl = readline.createInterface({ input: child.stdout });
 
   rl.on("line", (line) => {
@@ -128,12 +157,14 @@ function createWorkerTransport(): Promise<WorkerTransportState> {
         entry.reject(new Error(`Invalid dynafetch-net response: ${String(error)}`));
       }
       pending.clear();
+      updateRef();
       return;
     }
 
     const request = pending.get(payload.id);
     if (!request) return;
     pending.delete(payload.id);
+    updateRef();
 
     if (payload.error) {
       request.reject(new Error(payload.error.message || payload.error.code || "dynafetch-net request failed"));
@@ -151,9 +182,13 @@ function createWorkerTransport(): Promise<WorkerTransportState> {
   });
 
   const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
-    const reason = `dynafetch-net exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
-    for (const entry of pending.values()) {
-      entry.reject(new Error(reason));
+    // During Node shutdown, the child gets SIGKILL. Don't reject pending
+    // requests in that case — they're already abandoned fire-and-forget calls.
+    if (pending.size > 0 && signal !== "SIGKILL") {
+      const reason = `dynafetch-net exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
+      for (const entry of pending.values()) {
+        entry.reject(new Error(reason));
+      }
     }
     pending.clear();
     transportPromise = null;
@@ -181,7 +216,7 @@ function createWorkerTransport(): Promise<WorkerTransportState> {
     child.once("spawn", () => {
       if (!settled) {
         settled = true;
-        resolve({ child, pending });
+        resolve({ child, pending, updateRef, holdCount, hold, release });
       }
     });
   });
@@ -202,17 +237,22 @@ async function callWorker<T>(method: string, params: unknown, timeoutMs = 30_000
   return await new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       transport.pending.delete(id);
+      transport.updateRef();
       reject(new Error(`dynafetch-net request timed out after ${timeoutMs}ms (method: ${method})`));
     }, timeoutMs);
+    timer.unref(); // Don't let the timeout itself block exit
 
     transport.pending.set(id, {
       resolve: (value: unknown) => { clearTimeout(timer); resolve(value as T); },
       reject: (err: Error) => { clearTimeout(timer); reject(err); },
     });
+    transport.updateRef(); // Ref the child while request is in flight
+
     transport.child.stdin.write(`${payload}\n`, (error) => {
       if (!error) return;
       clearTimeout(timer);
       transport.pending.delete(id);
+      transport.updateRef();
       reject(error);
     });
   });
@@ -222,12 +262,16 @@ export async function withDynafetchSession<T>(
   options: WorkerSessionOptions,
   run: () => Promise<T>,
 ): Promise<T> {
+  const transport = await getWorkerTransport();
+  transport.hold(); // Keep child alive for the entire session
+
   const session = await callWorker<{ sessionId: string }>("openSession", options);
 
   try {
     return await sessionStore.run({ sessionId: session.sessionId }, run);
   } finally {
-    await callWorker("closeSession", { sessionId: session.sessionId }).catch(() => {});
+    callWorker("closeSession", { sessionId: session.sessionId }).catch(() => {});
+    transport.release();
   }
 }
 
