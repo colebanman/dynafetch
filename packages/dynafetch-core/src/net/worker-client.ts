@@ -99,11 +99,19 @@ function createWorkerCommand():
 
 function createWorkerTransport(): Promise<WorkerTransportState> {
   const { command, args, cwd } = createWorkerCommand();
-  const child = spawn(command, args, {
-    cwd,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: process.env,
-  });
+
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = spawn(command, args, {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: process.env,
+    });
+  } catch (err) {
+    return Promise.reject(
+      new Error(`Failed to start dynafetch-net TLS proxy: ${err instanceof Error ? err.message : String(err)}. Binary: ${command}`),
+    );
+  }
 
   const pending = new Map<string, PendingRequest>();
   const rl = readline.createInterface({ input: child.stdout });
@@ -138,7 +146,7 @@ function createWorkerTransport(): Promise<WorkerTransportState> {
   child.stderr.on("data", (chunk) => {
     const message = chunk.toString().trim();
     if (message) {
-      console.warn(`[dynafetch-net] ${message}`);
+      if (process.env.DYNAFETCH_DEBUG === '1') console.warn(`[dynafetch-net] ${message}`);
     }
   });
 
@@ -160,7 +168,23 @@ function createWorkerTransport(): Promise<WorkerTransportState> {
   });
   child.once("exit", onExit);
 
-  return Promise.resolve({ child, pending });
+  // Wait for the child to actually start (or fail) before returning.
+  // spawn emits "error" asynchronously if the binary isn't found.
+  return new Promise<WorkerTransportState>((resolve, reject) => {
+    let settled = false;
+    child.once("error", (err) => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`Failed to start dynafetch-net TLS proxy: ${err.message}. Binary: ${command}`));
+      }
+    });
+    child.once("spawn", () => {
+      if (!settled) {
+        settled = true;
+        resolve({ child, pending });
+      }
+    });
+  });
 }
 
 async function getWorkerTransport(): Promise<WorkerTransportState> {
@@ -170,15 +194,24 @@ async function getWorkerTransport(): Promise<WorkerTransportState> {
   return transportPromise;
 }
 
-async function callWorker<T>(method: string, params: unknown): Promise<T> {
+async function callWorker<T>(method: string, params: unknown, timeoutMs = 30_000): Promise<T> {
   const transport = await getWorkerTransport();
   const id = randomUUID();
   const payload = JSON.stringify({ id, method, params });
 
   return await new Promise<T>((resolve, reject) => {
-    transport.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
+    const timer = setTimeout(() => {
+      transport.pending.delete(id);
+      reject(new Error(`dynafetch-net request timed out after ${timeoutMs}ms (method: ${method})`));
+    }, timeoutMs);
+
+    transport.pending.set(id, {
+      resolve: (value: unknown) => { clearTimeout(timer); resolve(value as T); },
+      reject: (err: Error) => { clearTimeout(timer); reject(err); },
+    });
     transport.child.stdin.write(`${payload}\n`, (error) => {
       if (!error) return;
+      clearTimeout(timer);
       transport.pending.delete(id);
       reject(error);
     });

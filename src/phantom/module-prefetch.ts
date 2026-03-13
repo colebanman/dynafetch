@@ -87,7 +87,9 @@ export async function prefetchModuleGraph(
   // Iteratively batch-fetch unknowns and scan their imports
   for (let round = 0; round < maxRounds && toFetch.length > 0; round++) {
     if (process.env.PHANTOM_DEBUG_MODULES === '1') {
-      console.log(`[prefetch] Round ${round}: ${toFetch.length} modules`);
+      if (process.env.DYNAFETCH_DEBUG === '1') {
+        console.log(`[prefetch] Round ${round}: ${toFetch.length} modules`);
+      }
     }
 
     const payloads = toFetch.map(u => ({

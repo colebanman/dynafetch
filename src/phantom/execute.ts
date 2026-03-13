@@ -1,3 +1,4 @@
+import { log, warn } from './log.ts';
 import { JSDOM, VirtualConsole, CookieJar } from 'jsdom';
 import WebSocket from 'ws';
 import * as nodeCrypto from 'crypto';
@@ -473,7 +474,7 @@ export class Executor {
 	      const taskId = this.trackTaskStart('module_bundle', cacheKey, this.moduleWaitMs);
 	      try {
 	        if (process.env.PHANTOM_DEBUG_MODULES === '1') {
-	          console.log('[Executor] Bundling module entry:', cacheKey);
+	          log('[Executor] Bundling module entry:', cacheKey);
 	        }
         const cached = this.moduleBundleCache.get(cacheKey);
         if (cached) {
@@ -639,7 +640,7 @@ export class Executor {
 
         if (!this.windowClosed) window.eval(transformed);
         if (process.env.PHANTOM_DEBUG_MODULES === '1') {
-          console.log('[Executor] Module bundle eval complete:', cacheKey);
+          log('[Executor] Module bundle eval complete:', cacheKey);
         }
 	      } catch (e) {
 	        this.recordExecutionError(e, 'unhandledRejection');
@@ -1007,9 +1008,9 @@ export class Executor {
 
     try {
     const virtualConsole = new VirtualConsole();
-    virtualConsole.on("log", (...args) => console.log("[JSDOM Log]", ...args));
+    virtualConsole.on("log", (...args) => log("[JSDOM Log]", ...args));
     virtualConsole.on("error", (...args) => console.error("[JSDOM Error]", ...args));
-    virtualConsole.on("warn", (...args) => console.warn("[JSDOM Warn]", ...args));
+    virtualConsole.on("warn", (...args) => warn("[JSDOM Warn]", ...args));
 
     const cookieJar = new CookieJar();
     this.harvestData.cookies.forEach(c => {
@@ -1201,7 +1202,7 @@ export class Executor {
 	                      if (that.handledModuleScriptUrls.has(abs)) return;
 	                      that.handledModuleScriptUrls.add(abs);
 	                      if (process.env.PHANTOM_DEBUG_MODULES === '1') {
-	                        console.log('[Executor] Detected module script:', abs);
+	                        log('[Executor] Detected module script:', abs);
 	                      }
 	                      void that.handleModuleScript(abs, window);
 	                      return;
@@ -1374,7 +1375,7 @@ export class Executor {
               });
             }
           } catch (e) {
-            console.warn(`[Executor] Module script ${script.id} failed:`, e);
+            warn(`[Executor] Module script ${script.id} failed:`, e);
           } finally {
             currentScriptState.value = prevCurrentScript;
           }
@@ -1393,7 +1394,7 @@ export class Executor {
         try {
             window.eval(code);
         } catch (e) {
-            console.warn(`[Executor] Script ${script.id} failed:`, e);
+            warn(`[Executor] Script ${script.id} failed:`, e);
         } finally {
             currentScriptState.value = prevCurrentScript;
         }
@@ -1447,16 +1448,16 @@ export class Executor {
       await this.waitForModuleWork(this.moduleWaitMs);
     }
 
-	    console.log('[Executor] Waiting for network quiescence...');
+	    log('[Executor] Waiting for network quiescence...');
 	    const quiescenceStart = Date.now();
 	    try {
 	        await this.waitForQuiescence();
 	    } catch (e) {
-        console.warn('[Executor] Quiescence wait failed:', e);
+        warn('[Executor] Quiescence wait failed:', e);
     }
     this.timings.quiescence_ms = Date.now() - quiescenceStart;
     const reason = this.matchFound && !this.findAll ? '(early exit on match)' : '';
-	    console.log(`[Executor] Quiescence reached in ${Date.now() - quiescenceStart}ms ${reason}`);
+	    log(`[Executor] Quiescence reached in ${Date.now() - quiescenceStart}ms ${reason}`);
 
       const renderedHtml = this.serializeDocument(window);
 
@@ -1764,7 +1765,7 @@ export class Executor {
               this.asyncFlag = async !== false;
               this.aborted = false;
               if (process.env.PHANTOM_DEBUG_XHR === '1') {
-                console.log('[XHR open]', this.method, this.url);
+                log('[XHR open]', this.method, this.url);
               }
               this.readyState = 1;
               this.responseURL = this.url;
@@ -1826,7 +1827,7 @@ export class Executor {
               };
               that.logRequest(logEntry);
               if (process.env.PHANTOM_DEBUG_XHR === '1') {
-                console.log('[XHR send]', this.method, this.url, {
+                log('[XHR send]', this.method, this.url, {
                   hasBody: body != null,
                   headers,
                 });

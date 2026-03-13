@@ -1,3 +1,4 @@
+import { log, warn } from './log.ts';
 import * as cheerio from 'cheerio';
 import type { HarvestResult, ScriptAsset, NetworkLogEntry } from './types.ts';
 import { phantomFetch, phantomBatchFetch } from './phantom-proxy.ts';
@@ -122,7 +123,7 @@ export class Harvester {
           const location = data.headers['Location'] || data.headers['location'];
           if (location) {
             currentUrl = new URL(location, currentUrl).toString();
-            console.log(`[Harvest] Following redirect to: ${currentUrl}`);
+            log(`[Harvest] Following redirect to: ${currentUrl}`);
             redirectCount++;
             // Per HTTP spec: 302/303 redirects reset method to GET
             if (data.status === 302 || data.status === 303) {
@@ -222,11 +223,11 @@ export class Harvester {
   }
 
   async harvest(): Promise<HarvestResult> {
-    console.log(`[Harvest] Fetching ${this.targetUrl} via TLS Proxy...`);
+    log(`[Harvest] Fetching ${this.targetUrl} via TLS Proxy...`);
     let response = await this.fetchViaProxy(this.targetUrl, { ...DEFAULT_HEADERS, ...this.requestHeaders }, true);
 
     if (response.status >= 400) {
-      console.log(`[Harvest] Response Body on Error:`, response.body.substring(0, 500));
+      log(`[Harvest] Response Body on Error:`, response.body.substring(0, 500));
       if (this.looksBlocked(response.status, response.body || '')) {
         throw new BlockedByBotProtectionError(
           this.targetUrl,
@@ -241,7 +242,7 @@ export class Harvester {
 
     // --- Consent wall bypass ---
     if (this.isConsentWall(finalUrl, html)) {
-      console.log(`[Harvest] Consent wall detected at ${finalUrl}, attempting bypass...`);
+      log(`[Harvest] Consent wall detected at ${finalUrl}, attempting bypass...`);
       const form = this.parseConsentForm(html, finalUrl);
       if (form) {
         try {
@@ -255,34 +256,34 @@ export class Harvester {
           };
           const consentResp = await this.fetchViaProxy(form.action, postHeaders, true, 10, 'POST', formBody);
           if (consentResp.status < 400) {
-            console.log(`[Harvest] Consent POST succeeded (${consentResp.status}), final URL: ${consentResp.finalUrl}`);
+            log(`[Harvest] Consent POST succeeded (${consentResp.status}), final URL: ${consentResp.finalUrl}`);
             // The POST redirect chain often lands directly on the real page — use it if so
             if (!this.isConsentWall(consentResp.finalUrl, consentResp.body)) {
               response = consentResp;
               finalUrl = consentResp.finalUrl;
               html = consentResp.body;
-              console.log(`[Harvest] Consent bypass successful (from redirect), got real page at ${finalUrl}`);
+              log(`[Harvest] Consent bypass successful (from redirect), got real page at ${finalUrl}`);
             } else {
               // Redirect didn't land on the real page — re-fetch the original URL with consent cookies
-              console.log(`[Harvest] Consent redirect still on consent page, re-fetching original URL...`);
+              log(`[Harvest] Consent redirect still on consent page, re-fetching original URL...`);
               const retryResp = await this.fetchViaProxy(this.targetUrl, { ...DEFAULT_HEADERS, ...this.requestHeaders }, true);
               if (retryResp.status < 400 && !this.isConsentWall(retryResp.finalUrl, retryResp.body)) {
                 response = retryResp;
                 finalUrl = retryResp.finalUrl;
                 html = retryResp.body;
-                console.log(`[Harvest] Consent bypass successful (re-fetch), got real page at ${finalUrl}`);
+                log(`[Harvest] Consent bypass successful (re-fetch), got real page at ${finalUrl}`);
               } else {
-                console.warn(`[Harvest] Re-fetch after consent still returned consent wall, proceeding with original`);
+                warn(`[Harvest] Re-fetch after consent still returned consent wall, proceeding with original`);
               }
             }
           } else {
-            console.warn(`[Harvest] Consent POST returned ${consentResp.status}, proceeding with consent page`);
+            warn(`[Harvest] Consent POST returned ${consentResp.status}, proceeding with consent page`);
           }
         } catch (e) {
-          console.warn(`[Harvest] Consent bypass failed, proceeding with consent page:`, e);
+          warn(`[Harvest] Consent bypass failed, proceeding with consent page:`, e);
         }
       } else {
-        console.warn(`[Harvest] Could not parse consent form, proceeding with consent page`);
+        warn(`[Harvest] Could not parse consent form, proceeding with consent page`);
       }
     }
 
@@ -415,7 +416,7 @@ export class Harvester {
 
     const allPayloads = [...scriptPayloads, ...preloadPayloads];
     if (allPayloads.length > 0) {
-      console.log(`[Harvest] Batch-fetching ${scriptPayloads.length} scripts + ${preloadPayloads.length} modulepreloads...`);
+      log(`[Harvest] Batch-fetching ${scriptPayloads.length} scripts + ${preloadPayloads.length} modulepreloads...`);
       const allResponses = await phantomBatchFetch(allPayloads);
 
       // Process script responses
@@ -445,7 +446,7 @@ export class Harvester {
             execution: meta.execution,
           });
         } else {
-          console.warn(`[Harvest] Failed to fetch script ${meta.absoluteUrl}: status ${resp.status}`);
+          warn(`[Harvest] Failed to fetch script ${meta.absoluteUrl}: status ${resp.status}`);
         }
       }
 
