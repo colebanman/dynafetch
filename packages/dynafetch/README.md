@@ -4,6 +4,14 @@ Fetch any website like a real browser. One function call.
 
 dynafetch provides Chrome-level TLS fingerprinting, JavaScript execution, and full network interception. The response includes fully rendered HTML and all captured requests.
 
+## Install
+
+```bash
+npm i @grabbit-labs/dynafetch
+```
+
+## Usage
+
 ```ts
 import { dynafetch } from "@grabbit-labs/dynafetch";
 
@@ -60,6 +68,33 @@ const page = await dynafetch({
 });
 ```
 
+## AI SDK tool
+
+Use dynafetch as a tool in the [Vercel AI SDK](https://sdk.vercel.ai):
+
+```ts
+import { z } from "zod";
+import { generateText, tool } from "ai";
+import { dynafetch } from "@grabbit-labs/dynafetch";
+
+const result = await generateText({
+  model: yourModel,
+  tools: {
+    fetchPage: tool({
+      description: "Fetch a web page with full browser emulation and return the rendered HTML",
+      parameters: z.object({
+        url: z.string().url().describe("The URL to fetch"),
+      }),
+      execute: async ({ url }) => {
+        const page = await dynafetch(url);
+        return { html: page.html, status: page.status, framework: page.framework };
+      },
+    }),
+  },
+  prompt: "Get the homepage of example.com and summarize it",
+});
+```
+
 ## Quiescence tuning
 
 dynafetch waits for async network activity to complete before returning. These options control that behavior:
@@ -90,7 +125,7 @@ const page = await dynafetch({
 
 ## Architecture
 
-1. **Harvest**: fetches the HTML document through a Go-based TLS client matching Chrome's handshake. Parses scripts, modulepreloads, and SSR state.
+1. **Harvest**: fetches the HTML document through a TLS client matching Chrome's handshake. Parses scripts, modulepreloads, and SSR state.
 
 2. **Module graph resolution**: recursively discovers and batch-fetches the full JS dependency tree in parallel. 700+ modules resolve in approximately 5 batch rounds.
 
