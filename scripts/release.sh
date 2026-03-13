@@ -6,9 +6,11 @@ set -euo pipefail
 #
 # What it does:
 #   1. Bumps version in all package.json files
-#   2. Commits and tags
-#   3. Pushes to GitHub
-#   4. Publishes to npm
+#   2. Builds the package (esbuild bundle + copies binaries)
+#   3. Type-checks
+#   4. Commits and tags
+#   5. Pushes to GitHub
+#   6. Prints npm publish command
 
 BUMP="${1:-patch}"
 
@@ -41,6 +43,10 @@ for f in package.json packages/dynafetch/package.json packages/dynafetch-core/pa
   "
   echo "  Updated $f → $NEW_VERSION"
 done
+
+# Build
+echo "Building package..."
+node packages/dynafetch/build.mjs
 
 # Type check
 echo "Running type check..."

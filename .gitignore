@@ -5,6 +5,8 @@
 /dist
 /build
 /.next/
+packages/dynafetch/dist
+packages/dynafetch/bin
 
 # misc
 .DS_Store

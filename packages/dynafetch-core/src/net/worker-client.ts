@@ -57,11 +57,13 @@ function findPrecompiledBinary(): string | null {
   const ext = platform === "win32" ? ".exe" : "";
   const name = `dynafetch-net-${platform}-${arch}${ext}`;
 
-  // Look relative to this file (works whether running from source or installed)
+  // Look relative to this file. After bundling into dist/index.js, binaries
+  // are at ../bin/. In development, they're in packages/dynafetch-net/bin/.
   const candidates = [
-    path.resolve(__dirname, "../../../dynafetch-net/bin", name),
-    path.resolve(__dirname, "../../../../packages/dynafetch-net/bin", name),
-    path.resolve(process.cwd(), "packages/dynafetch-net/bin", name),
+    path.resolve(__dirname, "../bin", name),                                    // installed: dist/../bin
+    path.resolve(__dirname, "../../../dynafetch-net/bin", name),                // dev: dynafetch-core/src/net -> dynafetch-net/bin
+    path.resolve(__dirname, "../../../../packages/dynafetch-net/bin", name),    // dev: alt layout
+    path.resolve(process.cwd(), "packages/dynafetch-net/bin", name),           // dev: from workspace root
   ];
 
   for (const candidate of candidates) {
