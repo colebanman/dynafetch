@@ -51,6 +51,29 @@ const sessionStore = new AsyncLocalStorage<{ sessionId: string }>();
 
 let transportPromise: Promise<WorkerTransportState> | null = null;
 
+function findPrecompiledBinary(): string | null {
+  const platform = process.platform;   // "darwin", "linux", "win32"
+  const arch = process.arch === "x64" ? "x64" : "arm64";
+  const ext = platform === "win32" ? ".exe" : "";
+  const name = `dynafetch-net-${platform}-${arch}${ext}`;
+
+  // Look relative to this file (works whether running from source or installed)
+  const candidates = [
+    path.resolve(__dirname, "../../../dynafetch-net/bin", name),
+    path.resolve(__dirname, "../../../../packages/dynafetch-net/bin", name),
+    path.resolve(process.cwd(), "packages/dynafetch-net/bin", name),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const fs = require("fs") as typeof import("fs");
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {}
+  }
+  return null;
+}
+
 function createWorkerCommand():
   | { command: string; args: string[]; cwd?: string }
   | { command: string; args: string[]; cwd: string } {
@@ -59,6 +82,12 @@ function createWorkerCommand():
     return { command: explicitBin, args: [] };
   }
 
+  const precompiled = findPrecompiledBinary();
+  if (precompiled) {
+    return { command: precompiled, args: [] };
+  }
+
+  // Fallback: try `go run` for development
   return {
     command: "go",
     args: ["run", "."],

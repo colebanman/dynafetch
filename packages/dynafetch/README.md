@@ -101,7 +101,8 @@ const page = await dynafetch({
 ## Requirements
 
 - Node.js 18+
-- Go 1.21+ (for the TLS proxy)
+
+The TLS proxy ships as precompiled binaries for macOS (arm64, x64), Linux (arm64, x64), and Windows (x64). No additional toolchain required.
 
 ## License
 

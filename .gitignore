@@ -9,10 +9,6 @@
 # misc
 .DS_Store
 *.pem
-*.exe
-*.dll
-*.so
-*.dylib
 
 # debug
 npm-debug.log*
@@ -22,6 +18,8 @@ yarn-debug.log*
 .env
 .env.*
 proxies.txt
+
+# old build artifacts (not the precompiled bin/ directory)
 packages/dynafetch-net/phantom-proxy
 packages/dynafetch-net/dynafetch-net
 
