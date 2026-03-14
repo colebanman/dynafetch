@@ -59,7 +59,7 @@ echo "Running type check..."
 npx tsc --noEmit
 
 # Git commit, tag, push
-git add package.json packages/dynafetch/package.json packages/dynafetch/dist packages/dynafetch/bin
+git add package.json packages/dynafetch/package.json
 git commit -m "v$NEW_VERSION"
 git tag "v$NEW_VERSION"
 git push origin main --tags
