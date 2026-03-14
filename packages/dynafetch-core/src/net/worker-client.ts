@@ -294,7 +294,8 @@ export async function withDynafetchSession<T>(
   try {
     return await sessionStore.run({ sessionId: session.sessionId }, run);
   } finally {
-    callWorker("closeSession", { sessionId: session.sessionId }).catch(() => {});
+    const closeTimeoutMs = Math.min(resolveRpcTimeoutMs(options), 5_000);
+    await callWorker("closeSession", { sessionId: session.sessionId }, closeTimeoutMs).catch(() => {});
     transport.release();
   }
 }

@@ -106,6 +106,7 @@ export class Executor {
   private esbuildModule: any = null;
   private originalGlobalMessageChannel: any = undefined;
   private originalGlobalMessagePort: any = undefined;
+  private activeTimerHandles = new Set<any>();
 
   // Simple telemetry counters (useful for debugging).
   private telemetry_stubbed = 0;
@@ -227,6 +228,15 @@ export class Executor {
         handle.unref?.();
       } catch {}
     }
+  }
+
+  private clearTrackedTimers(window: any) {
+    for (const handle of this.activeTimerHandles) {
+      try { window.clearTimeout?.(handle); } catch {}
+      try { window.clearInterval?.(handle); } catch {}
+      try { handle?.unref?.(); } catch {}
+    }
+    this.activeTimerHandles.clear();
   }
 
   private applyDefaults(quiescence?: QuiescenceOptions, moduleWaitMsOverride?: number) {
@@ -772,15 +782,80 @@ export class Executor {
     }
 
     // Prefer Node's built-in fetch primitives (Undici) when available.
+    // Keep the whole family on the same realm; mixed Request/AbortSignal realms
+    // trigger WebIDL brand-check failures on sites that construct Request objects.
     const g: any = globalThis as any;
-    if (!window.Headers && g.Headers) window.Headers = g.Headers;
-    if (!window.Request && g.Request) window.Request = g.Request;
-    if (!window.Response && g.Response) window.Response = g.Response;
-    if (!window.AbortController && g.AbortController) window.AbortController = g.AbortController;
-    if (!window.AbortSignal && g.AbortSignal) window.AbortSignal = g.AbortSignal;
+    if (g.Headers) window.Headers = g.Headers;
+    if (g.Response) window.Response = g.Response;
+    if (g.AbortController) window.AbortController = g.AbortController;
+    if (g.AbortSignal) window.AbortSignal = g.AbortSignal;
     if (!window.TextEncoder && g.TextEncoder) window.TextEncoder = g.TextEncoder;
     if (!window.TextDecoder && g.TextDecoder) window.TextDecoder = g.TextDecoder;
     if (!window.structuredClone && g.structuredClone) window.structuredClone = g.structuredClone.bind(g);
+
+    const normalizeUrlForRequest = (value: any) => {
+      if (typeof value !== 'string') return value;
+      try {
+        return new URL(value, window.location.href).toString();
+      } catch {
+        return value;
+      }
+    };
+
+    const normalizeAbortSignalForRequest = (signal: any) => {
+      if (!signal || !g.AbortController || !g.AbortSignal) return signal;
+      if (signal instanceof g.AbortSignal) return signal;
+      if (typeof signal.aborted !== 'boolean') return undefined;
+
+      const controller = new g.AbortController();
+      if (signal.aborted) {
+        try {
+          controller.abort((signal as any).reason);
+        } catch {
+          controller.abort();
+        }
+        return controller.signal;
+      }
+
+      if (typeof signal.addEventListener === 'function') {
+        try {
+          signal.addEventListener('abort', () => {
+            try {
+              controller.abort((signal as any).reason);
+            } catch {
+              controller.abort();
+            }
+          }, { once: true });
+        } catch {}
+      }
+
+      return controller.signal;
+    };
+
+    if (g.Request) {
+      const NativeRequest = g.Request;
+      const RequestShim = class Request extends NativeRequest {
+        constructor(input: any, init?: any) {
+          const normalizedInput =
+            typeof input === 'string'
+              ? normalizeUrlForRequest(input)
+              : input instanceof URL
+                ? normalizeUrlForRequest(input.toString())
+                : input;
+
+          const normalizedInit = init && typeof init === 'object'
+            ? {
+                ...init,
+                signal: normalizeAbortSignalForRequest(init.signal),
+              }
+            : init;
+
+          super(normalizedInput, normalizedInit);
+        }
+      } as any;
+      try { Object.setPrototypeOf(RequestShim, NativeRequest); } catch {}
+      window.Request = RequestShim;
+    }
 
     const makeStorage = () => {
       const store = new Map<string, string>();
@@ -989,8 +1064,41 @@ export class Executor {
     };
     const _setTimeout = window.setTimeout?.bind(window);
     const _setInterval = window.setInterval?.bind(window);
-    if (_setTimeout) window.setTimeout = (cb: any, ms?: any, ...rest: any[]) => _setTimeout(wrapCb(cb), ms, ...rest);
-    if (_setInterval) window.setInterval = (cb: any, ms?: any, ...rest: any[]) => _setInterval(wrapCb(cb), ms, ...rest);
+    const _clearTimeout = window.clearTimeout?.bind(window);
+    const _clearInterval = window.clearInterval?.bind(window);
+    if (_setTimeout) {
+      window.setTimeout = (cb: any, ms?: any, ...rest: any[]) => {
+        let handle: any;
+        const wrapped = wrapCb((...args: any[]) => {
+          this.activeTimerHandles.delete(handle);
+          return typeof cb === 'function' ? cb(...args) : cb;
+        });
+        handle = _setTimeout(wrapped, ms, ...rest);
+        this.activeTimerHandles.add(handle);
+        handle?.unref?.();
+        return handle;
+      };
+    }
+    if (_setInterval) {
+      window.setInterval = (cb: any, ms?: any, ...rest: any[]) => {
+        const handle = _setInterval(wrapCb(cb), ms, ...rest);
+        this.activeTimerHandles.add(handle);
+        handle?.unref?.();
+        return handle;
+      };
+    }
+    if (_clearTimeout) {
+      window.clearTimeout = (handle: any) => {
+        this.activeTimerHandles.delete(handle);
+        return _clearTimeout(handle);
+      };
+    }
+    if (_clearInterval) {
+      window.clearInterval = (handle: any) => {
+        this.activeTimerHandles.delete(handle);
+        return _clearInterval(handle);
+      };
+    }
     if (window.queueMicrotask) {
       const _q = window.queueMicrotask.bind(window);
       window.queueMicrotask = (cb: any) => _q(wrapCb(cb));
@@ -1108,11 +1216,11 @@ export class Executor {
     process.on('uncaughtException', onNodeUncaught);
     process.on('unhandledRejection', onNodeUnhandled);
 
-    try {
-    const virtualConsole = new VirtualConsole();
-    virtualConsole.on("log", (...args) => log("[JSDOM Log]", ...args));
-    virtualConsole.on("error", (...args) => console.error("[JSDOM Error]", ...args));
-    virtualConsole.on("warn", (...args) => warn("[JSDOM Warn]", ...args));
+	    try {
+	    const virtualConsole = new VirtualConsole();
+	    virtualConsole.on("log", (...args) => log("[JSDOM Log]", ...args));
+	    virtualConsole.on("error", (...args) => warn("[JSDOM Error]", ...args));
+	    virtualConsole.on("warn", (...args) => warn("[JSDOM Warn]", ...args));
 
     const cookieJar = new CookieJar();
     this.harvestData.cookies.forEach(c => {
@@ -1561,11 +1669,12 @@ export class Executor {
     const reason = this.matchFound && !this.findAll ? '(early exit on match)' : '';
 	    log(`[Executor] Quiescence reached in ${Date.now() - quiescenceStart}ms ${reason}`);
 
-      const renderedHtml = this.serializeDocument(window);
+	      const renderedHtml = this.serializeDocument(window);
 
-	    // Mark execution complete so any late dynamic loaders skip eval work.
-	    this.windowClosed = true;
-	    try { window.close(); } catch {}
+		    // Mark execution complete so any late dynamic loaders skip eval work.
+		    // Keep the JSDOM window alive briefly so late promise/timer callbacks can
+        // still read globals like location without crashing during teardown.
+		    this.windowClosed = true;
 
 	    const result: ExecutionResult = {
 	      logs: this.logs,
@@ -1582,6 +1691,7 @@ export class Executor {
     // that some third-party scripts schedule during teardown.
 	    const shutdownGraceMs = this.clampMs(Number(process.env.PHANTOM_SHUTDOWN_GRACE_MS ?? 50), 10, 5_000);
 	    await new Promise((r) => setTimeout(r, shutdownGraceMs));
+      this.clearTrackedTimers(window);
       this.unrefNewMessagePorts(initialActiveHandles);
 
 	    return result;
@@ -1707,9 +1817,15 @@ export class Executor {
       return safe;
     };
     
-    window.__phantom = {
-      fetch: async (input: any, opts: any = {}) => {
-        const norm = await normalizeFetchInput(input, opts);
+	    window.__phantom = {
+	      fetch: async (input: any, opts: any = {}) => {
+        if (that.windowClosed) {
+          return new (window.Response || (global as any).Response)('', {
+            status: 200,
+            headers: toSafeResponseHeaders({}),
+          });
+        }
+	        const norm = await normalizeFetchInput(input, opts);
         const start = Date.now();
         const headers = {
           'User-Agent': window.navigator.userAgent,
@@ -1796,8 +1912,9 @@ export class Executor {
         }
       },
       
-      dynamicImport: async (url: string) => {
-         const fullUrl = new URL(url, window.location.href).toString();
+	      dynamicImport: async (url: string) => {
+         if (that.windowClosed) return {};
+	         const fullUrl = new URL(url, window.location.href).toString();
          const start = Date.now();
          const logEntry: NetworkLogEntry = { 
              type: 'dynamic_import', 
@@ -1923,8 +2040,14 @@ export class Executor {
               this.onloadend?.({ type: 'loadend' });
           }
 
-          async send(body?: any) {
-              const start = Date.now();
+	          async send(body?: any) {
+                if (that.windowClosed) {
+                  this.readyState = 4;
+                  this.status = 0;
+                  this.onloadend?.({ type: 'loadend' });
+                  return;
+                }
+	              const start = Date.now();
               const headers = {
                   'User-Agent': window.navigator.userAgent,
                   'Cookie': window.document.cookie,
