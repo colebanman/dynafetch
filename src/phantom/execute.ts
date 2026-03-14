@@ -10,6 +10,39 @@ import { chromeDocumentHeaders, chromeSubresourceHeaders } from './headers.ts';
 import { compileMatcher, type CompiledMatcher } from './matcher.ts';
 import { shouldSkipDynamicScriptUrl, shouldSkipScriptAsset, type ThirdPartyPolicy } from './script-policy.ts';
 
+let esbuildModulePromise: Promise<any> | null = null;
+let esbuildRefCount = 0;
+
+async function acquireEsbuildModule(): Promise<any> {
+  if (!esbuildModulePromise) {
+    esbuildModulePromise = import('esbuild');
+  }
+
+  esbuildRefCount++;
+  try {
+    return await esbuildModulePromise;
+  } catch (error) {
+    esbuildRefCount = Math.max(0, esbuildRefCount - 1);
+    if (esbuildRefCount === 0) esbuildModulePromise = null;
+    throw error;
+  }
+}
+
+function releaseEsbuildModule(esbuildMod: any): void {
+  if (!esbuildMod) return;
+
+  esbuildRefCount = Math.max(0, esbuildRefCount - 1);
+  if (esbuildRefCount > 0) return;
+
+  const stopFn = esbuildMod?.stop || esbuildMod?.default?.stop;
+  if (typeof stopFn === 'function') {
+    try {
+      stopFn.call(esbuildMod?.default ?? esbuildMod);
+    } catch {}
+  }
+  esbuildModulePromise = null;
+}
+
 export interface QuiescenceOptions {
   minWaitMs?: number;
   idleWaitMs?: number;
@@ -70,6 +103,9 @@ export class Executor {
   private moduleResolveCache = new Map<string, { contents: string; loader: "js" | "ts" }>(); // url -> source
   private moduleInFlight = new Map<string, Promise<void>>(); // entryUrl -> promise
   private windowClosed: boolean = false;
+  private esbuildModule: any = null;
+  private originalGlobalMessageChannel: any = undefined;
+  private originalGlobalMessagePort: any = undefined;
 
   // Simple telemetry counters (useful for debugging).
   private telemetry_stubbed = 0;
@@ -181,6 +217,16 @@ export class Executor {
   private recordWarning(warning?: string) {
     if (!warning) return;
     this.warnings.add(warning);
+  }
+
+  private unrefNewMessagePorts(initialHandles: Set<any>) {
+    for (const handle of (process as any)._getActiveHandles()) {
+      if (initialHandles.has(handle)) continue;
+      if (handle?.constructor?.name !== 'MessagePort') continue;
+      try {
+        handle.unref?.();
+      } catch {}
+    }
   }
 
   private applyDefaults(quiescence?: QuiescenceOptions, moduleWaitMsOverride?: number) {
@@ -517,10 +563,11 @@ export class Executor {
           return;
         }
 
-        const esbuildMod: any = await import('esbuild');
-        const buildFn = esbuildMod?.build || esbuildMod?.default?.build;
-        if (typeof buildFn !== 'function') {
-          throw new Error('esbuild.build not available (esbuild import failed)');
+	        const esbuildMod: any = this.esbuildModule ?? await acquireEsbuildModule();
+          this.esbuildModule = esbuildMod;
+	        const buildFn = esbuildMod?.build || esbuildMod?.default?.build;
+	        if (typeof buildFn !== 'function') {
+	          throw new Error('esbuild.build not available (esbuild import failed)');
         }
 
         const entry = new URL(entryUrl);
@@ -807,8 +854,27 @@ export class Executor {
     // Node.js provides it globally since v15; expose it on window for scripts that expect it.
     {
       const _g: any = globalThis as any;
-      if (!window.MessageChannel && _g.MessageChannel) window.MessageChannel = _g.MessageChannel;
-      if (!window.MessagePort && _g.MessagePort) window.MessagePort = _g.MessagePort;
+      if (_g.MessageChannel) {
+        if (this.originalGlobalMessageChannel === undefined) {
+          this.originalGlobalMessageChannel = _g.MessageChannel;
+        }
+        const NativeMessageChannel = _g.MessageChannel;
+        const UnrefMessageChannel = class MessageChannel extends NativeMessageChannel {
+          constructor() {
+            super();
+            this.port1?.unref?.();
+            this.port2?.unref?.();
+          }
+        } as any;
+        window.MessageChannel = UnrefMessageChannel;
+        _g.MessageChannel = UnrefMessageChannel;
+      }
+      if (_g.MessagePort) {
+        if (this.originalGlobalMessagePort === undefined) {
+          this.originalGlobalMessagePort = _g.MessagePort;
+        }
+        window.MessagePort = _g.MessagePort;
+      }
     }
 
     if (!window.requestIdleCallback) {
@@ -1038,6 +1104,7 @@ export class Executor {
   async execute(): Promise<ExecutionResult> {
     const onNodeUncaught = (err: unknown) => this.recordExecutionError(err, 'uncaughtException');
     const onNodeUnhandled = (reason: unknown) => this.recordExecutionError(reason, 'unhandledRejection');
+    const initialActiveHandles = new Set((process as any)._getActiveHandles());
     process.on('uncaughtException', onNodeUncaught);
     process.on('unhandledRejection', onNodeUnhandled);
 
@@ -1513,15 +1580,27 @@ export class Executor {
     // error handlers are still installed, so they get recorded instead of crashing the process.
     // Keep process-level handlers attached briefly to absorb late promise callbacks
     // that some third-party scripts schedule during teardown.
-    const shutdownGraceMs = this.clampMs(Number(process.env.PHANTOM_SHUTDOWN_GRACE_MS ?? 50), 10, 5_000);
-    await new Promise((r) => setTimeout(r, shutdownGraceMs));
+	    const shutdownGraceMs = this.clampMs(Number(process.env.PHANTOM_SHUTDOWN_GRACE_MS ?? 50), 10, 5_000);
+	    await new Promise((r) => setTimeout(r, shutdownGraceMs));
+      this.unrefNewMessagePorts(initialActiveHandles);
 
-    return result;
+	    return result;
 
-    } finally {
-      process.off('uncaughtException', onNodeUncaught);
-      process.off('unhandledRejection', onNodeUnhandled);
-    }
+	    } finally {
+        const g: any = globalThis as any;
+        if (this.originalGlobalMessageChannel !== undefined) {
+          g.MessageChannel = this.originalGlobalMessageChannel;
+          this.originalGlobalMessageChannel = undefined;
+        }
+        if (this.originalGlobalMessagePort !== undefined) {
+          g.MessagePort = this.originalGlobalMessagePort;
+          this.originalGlobalMessagePort = undefined;
+        }
+	      releaseEsbuildModule(this.esbuildModule);
+        this.esbuildModule = null;
+	      process.off('uncaughtException', onNodeUncaught);
+	      process.off('unhandledRejection', onNodeUnhandled);
+	    }
   }
 
   private serializeDocument(window: any): string {
