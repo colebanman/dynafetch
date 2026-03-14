@@ -1,11 +1,10 @@
-import type { HarvestResult } from "../../../src/phantom/types.ts";
-import type { DynafetchFramework } from "./types";
+import type { DynafetchFramework, DynafetchHarvestSnapshot } from "./types";
 
-function hasScriptUrl(harvest: HarvestResult, pattern: RegExp): boolean {
+function hasScriptUrl(harvest: DynafetchHarvestSnapshot, pattern: RegExp): boolean {
   return harvest.scripts.some((script) => Boolean(script.url && pattern.test(script.url)));
 }
 
-export function detectFramework(harvest: HarvestResult): DynafetchFramework {
+export function detectFramework(harvest: DynafetchHarvestSnapshot): DynafetchFramework {
   const html = harvest.html;
   const lower = html.toLowerCase();
 

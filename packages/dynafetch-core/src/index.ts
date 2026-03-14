@@ -1,7 +1,7 @@
-import * as net from "node:net";
 import { Executor } from "../../../src/phantom/execute.ts";
 import { Harvester } from "../../../src/phantom/harvest.ts";
 import type { ExecutionError } from "../../../src/phantom/types.ts";
+import { assertSafeHttpUrlSync } from "../../../src/phantom/url-safety.ts";
 import { detectFramework } from "./detect";
 import { dynafetchNetBatchFetch, dynafetchNetFetch, dynafetchNetHealth, withDynafetchSession } from "./net/worker-client";
 import { planDynafetch } from "./planner";
@@ -9,6 +9,7 @@ import type { DynafetchOptions, DynafetchPlan, DynafetchProxyConfig, DynafetchPr
 
 export type {
   DynafetchFramework,
+  DynafetchHarvestSnapshot,
   DynafetchOptions,
   DynafetchPlan,
   DynafetchProxyConfig,
@@ -34,31 +35,6 @@ class DynafetchInputError extends Error {
     this.name = "DynafetchInputError";
     this.status = status;
   }
-}
-
-function isPrivateOrLocalHost(hostname: string): boolean {
-  const h = hostname.toLowerCase();
-  if (h === "localhost" || h.endsWith(".localhost") || h === "0.0.0.0") return true;
-  if (h === "metadata.google.internal") return true;
-
-  const ipVer = net.isIP(h);
-  if (!ipVer) return false;
-
-  if (ipVer === 4) {
-    const [a, b] = h.split(".").map((x) => Number(x));
-    if (a === 10) return true;
-    if (a === 127) return true;
-    if (a === 0) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    return false;
-  }
-
-  if (h === "::1") return true;
-  if (h.startsWith("fe80:")) return true;
-  if (h.startsWith("fc") || h.startsWith("fd")) return true;
-  return false;
 }
 
 export type NormalizedProxy = {
@@ -103,16 +79,10 @@ function normalizeOptions(input: string | DynafetchOptions): DynafetchOptions {
 
   let parsedUrl: URL;
   try {
-    parsedUrl = new URL(options.url);
-  } catch {
-    throw new DynafetchInputError("Invalid URL");
-  }
-
-  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-    throw new DynafetchInputError("Only http(s) URLs are allowed");
-  }
-  if (isPrivateOrLocalHost(parsedUrl.hostname)) {
-    throw new DynafetchInputError("Refusing to fetch local/private addresses");
+    parsedUrl = assertSafeHttpUrlSync(options.url);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Invalid URL";
+    throw new DynafetchInputError(message);
   }
 
   return {
@@ -126,8 +96,18 @@ function normalizeOptions(input: string | DynafetchOptions): DynafetchOptions {
   };
 }
 
-function toWarnings(plan: DynafetchPlan, errors: ExecutionError[] | undefined, options: DynafetchOptions): string[] {
+function toWarnings(
+  plan: DynafetchPlan,
+  errors: ExecutionError[] | undefined,
+  options: DynafetchOptions,
+  runtimeWarnings: string[] = [],
+): string[] {
   const warnings = [plan.reason];
+  for (const warning of runtimeWarnings) {
+    if (warning && !warnings.includes(warning)) {
+      warnings.push(warning);
+    }
+  }
 
   if (plan.strategy === "jsdom-fallback" || plan.strategy === "framework-probe") {
     warnings.push("runtime execution used the legacy JSDOM-based renderer while lightweight adapters are still being built");
@@ -169,6 +149,33 @@ function computeConfidence(params: {
 
   confidence -= Math.min(0.28, params.executionErrors * 0.07);
   return Math.max(0.05, Math.min(0.98, Number(confidence.toFixed(2))));
+}
+
+function createTimeoutError(timeoutMs: number): Error {
+  const error = new Error(`dynafetch timed out after ${timeoutMs}ms`);
+  error.name = "DynafetchTimeoutError";
+  return error;
+}
+
+async function withOperationTimeout<T>(operation: Promise<T>, timeoutMs?: number): Promise<T> {
+  if (!timeoutMs || !Number.isFinite(timeoutMs)) {
+    return await operation;
+  }
+
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(createTimeoutError(Math.max(1, Math.ceil(timeoutMs)))), Math.max(1, Math.ceil(timeoutMs)));
+    timer.unref?.();
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 /**
@@ -232,88 +239,104 @@ function computeConfidence(params: {
 export async function dynafetch(input: string | DynafetchOptions): Promise<DynafetchResult> {
   const options = normalizeOptions(input);
   const timeoutSeconds = options.timeoutMs ? Math.max(1, Math.ceil(options.timeoutMs / 1000)) : undefined;
+  const deadlineAt = options.timeoutMs ? Date.now() + options.timeoutMs : undefined;
   const initialCookies = normalizeCookies(options.cookies);
   const proxy = normalizeProxy(options.proxy);
 
-  return await withDynafetchSession(
-    {
-      browserProfile: options.browserProfile,
-      timeoutSeconds,
-      proxy: proxy?.url,
-    },
-    async () => {
-      const totalStart = Date.now();
-      const harvestStart = Date.now();
-      const harvester = new Harvester(options.url, {
-        prefetchExternalScripts: options.prefetchExternalScripts,
-        prefetchModulePreloads: options.prefetchModulePreloads,
-        requestHeaders: options.headers,
-        initialCookies,
-        thirdPartyPolicy: options.thirdPartyPolicy,
-        proxy,
-      });
-      const harvest = await harvester.harvest();
-      const harvestMs = Date.now() - harvestStart;
-
-      const framework = detectFramework(harvest);
-      const plan = planDynafetch(framework, harvest, options.allowJsdomFallback !== false);
-
-      let html = harvest.html;
-      let requestCount = harvest.logs.length;
-      let executionErrors: ExecutionError[] | undefined;
-      let executeMs = 0;
-      let quiescenceMs = 0;
-      let scriptsTransformed = 0;
-
-      if (plan.strategy !== "static-html") {
-        const executeStart = Date.now();
-        const executor = new Executor(harvest, {
+  return await withOperationTimeout(
+    withDynafetchSession(
+      {
+        browserProfile: options.browserProfile,
+        timeoutSeconds,
+        proxy: proxy?.url,
+        rpcTimeoutMs: options.timeoutMs,
+      },
+      async () => {
+        const totalStart = Date.now();
+        const harvestStart = Date.now();
+        const harvester = new Harvester(options.url, {
+          prefetchExternalScripts: options.prefetchExternalScripts,
+          prefetchModulePreloads: options.prefetchModulePreloads,
+          requestHeaders: options.headers,
+          initialCookies,
           thirdPartyPolicy: options.thirdPartyPolicy,
-          quiescence: {
-            minWaitMs: options.minWaitMs,
-            idleWaitMs: options.idleWaitMs,
-            maxWaitMs: options.maxWaitMs,
-          },
-          moduleWaitMs: options.moduleWaitMs,
           proxy,
+          timeoutMs: options.timeoutMs,
+          deadlineAt,
         });
-        const execution = await executor.execute();
-        executeMs = Date.now() - executeStart;
-        html = execution.renderedHtml ?? harvest.html;
-        requestCount = execution.logs.length;
-        executionErrors = execution.errors;
-        quiescenceMs = execution.timings?.quiescence_ms ?? 0;
-        scriptsTransformed = execution.timings?.scripts_transformed_count ?? 0;
-      }
+        const harvest = await harvester.harvest();
+        const harvestMs = Date.now() - harvestStart;
 
-      const totalMs = Date.now() - totalStart;
-      const warnings = toWarnings(plan, executionErrors, options);
-      const confidence = computeConfidence({
-        plan,
-        initialStateCount: Object.keys(harvest.initialState).length,
-        executionErrors: executionErrors?.length ?? 0,
-        htmlLength: html.length,
-      });
+        const framework = detectFramework(harvest);
+        const plan = planDynafetch(framework, harvest, options.allowJsdomFallback !== false);
 
-      return {
-        url: options.url,
-        finalUrl: harvest.url,
-        status: harvest.status,
-        html,
-        framework,
-        strategy: plan.strategy,
-        confidence,
-        warnings,
-        timings: {
-          total: totalMs,
-          harvest: harvestMs,
-          execute: executeMs,
-          quiescence: quiescenceMs,
-          scriptsTransformed,
-        },
-        requestCount,
-      };
-    },
+        let html = harvest.html;
+        let requestCount = harvest.logs.length;
+        let executionErrors: ExecutionError[] | undefined;
+        let executionWarnings: string[] = [];
+        let executeMs = 0;
+        let quiescenceMs = 0;
+        let scriptsTransformed = 0;
+
+        if (plan.strategy !== "static-html") {
+          const executeStart = Date.now();
+          const executor = new Executor(harvest, {
+            thirdPartyPolicy: options.thirdPartyPolicy,
+            quiescence: {
+              minWaitMs: options.minWaitMs,
+              idleWaitMs: options.idleWaitMs,
+              maxWaitMs: options.maxWaitMs,
+            },
+            moduleWaitMs: options.moduleWaitMs,
+            proxy,
+            timeoutMs: options.timeoutMs,
+            deadlineAt,
+          });
+          const execution = await executor.execute();
+          executeMs = Date.now() - executeStart;
+          html = execution.renderedHtml ?? harvest.html;
+          requestCount = execution.logs.length;
+          executionErrors = execution.errors;
+          executionWarnings = execution.warnings ?? [];
+          quiescenceMs = execution.timings?.quiescence_ms ?? 0;
+          scriptsTransformed = execution.timings?.scripts_transformed_count ?? 0;
+        }
+
+        const totalMs = Date.now() - totalStart;
+        const warnings = toWarnings(
+          plan,
+          executionErrors,
+          options,
+          [...(harvest.warnings ?? []), ...executionWarnings],
+        );
+        const confidence = computeConfidence({
+          plan,
+          initialStateCount: Object.keys(harvest.initialState).length,
+          executionErrors: executionErrors?.length ?? 0,
+          htmlLength: html.length,
+        });
+
+        return {
+          url: options.url,
+          finalUrl: harvest.url,
+          status: harvest.status,
+          html,
+          framework,
+          strategy: plan.strategy,
+          confidence,
+          warnings,
+          timings: {
+            total: totalMs,
+            harvest: harvestMs,
+            execute: executeMs,
+            quiescence: quiescenceMs,
+            scriptsTransformed,
+          },
+          requestCount,
+        };
+      },
+    ),
+    options.timeoutMs,
   );
 }
 

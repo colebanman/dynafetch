@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { mkdirSync, chmodSync } from "fs";
+import { mkdirSync, chmodSync, copyFileSync, rmSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { execSync } from "child_process";
@@ -7,6 +7,10 @@ import { execSync } from "child_process";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "../..");
 const goSrc = resolve(root, "packages/dynafetch-net");
+const distDir = resolve(__dirname, "dist");
+
+rmSync(distDir, { recursive: true, force: true });
+mkdirSync(distDir, { recursive: true });
 
 // Bundle everything into one JS file
 await build({
@@ -15,7 +19,7 @@ await build({
   platform: "node",
   target: "node18",
   format: "esm",
-  outfile: resolve(__dirname, "dist/index.js"),
+  outfile: resolve(distDir, "index.js"),
   sourcemap: true,
   external: [
     "node:*",
@@ -38,6 +42,8 @@ await build({
   },
 });
 
+copyFileSync(resolve(__dirname, "src/public-api.d.ts"), resolve(distDir, "index.d.ts"));
+
 // Cross-compile Go binaries directly into the package bin/ directory.
 const binDir = resolve(__dirname, "bin");
 mkdirSync(binDir, { recursive: true });
@@ -59,4 +65,4 @@ for (const t of targets) {
   try { chmodSync(out, 0o755); } catch {}
 }
 
-console.log("Build complete: dist/index.js + bin/");
+console.log("Build complete: dist/ + bin/");

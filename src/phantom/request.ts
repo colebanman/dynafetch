@@ -1,6 +1,6 @@
-import * as net from 'node:net';
 import { runPhantom, type RunPhantomInput, type RunPhantomOutput } from './run';
 import { compileMatcher } from './matcher';
+import { assertSafeHttpUrlSync } from './url-safety.ts';
 
 export class PhantomInputError extends Error {
   status: number;
@@ -12,31 +12,6 @@ export class PhantomInputError extends Error {
   }
 }
 
-function isPrivateOrLocalHost(hostname: string): boolean {
-  const h = hostname.toLowerCase();
-  if (h === 'localhost' || h.endsWith('.localhost') || h === '0.0.0.0') return true;
-  if (h === 'metadata.google.internal') return true;
-
-  const ipVer = net.isIP(h);
-  if (!ipVer) return false;
-
-  if (ipVer === 4) {
-    const [a, b] = h.split('.').map((x) => Number(x));
-    if (a === 10) return true;
-    if (a === 127) return true;
-    if (a === 0) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    return false;
-  }
-
-  if (h === '::1') return true;
-  if (h.startsWith('fe80:')) return true;
-  if (h.startsWith('fc') || h.startsWith('fd')) return true;
-  return false;
-}
-
 export function normalizePhantomInput(input: Partial<RunPhantomInput>): RunPhantomInput {
   if (!input.url) {
     throw new PhantomInputError('URL is required');
@@ -44,16 +19,10 @@ export function normalizePhantomInput(input: Partial<RunPhantomInput>): RunPhant
 
   let parsedUrl: URL;
   try {
-    parsedUrl = new URL(input.url);
-  } catch {
-    throw new PhantomInputError('Invalid URL');
-  }
-
-  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-    throw new PhantomInputError('Only http(s) URLs are allowed');
-  }
-  if (isPrivateOrLocalHost(parsedUrl.hostname)) {
-    throw new PhantomInputError('Refusing to fetch local/private addresses');
+    parsedUrl = assertSafeHttpUrlSync(input.url);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Invalid URL';
+    throw new PhantomInputError(message);
   }
 
   if (input.matcherRegex !== undefined && typeof input.matcherRegex !== 'boolean') {

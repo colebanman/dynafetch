@@ -16,6 +16,12 @@ export type DynafetchStrategy =
   | "framework-probe"
   | "jsdom-fallback";
 
+export type DynafetchHarvestSnapshot = {
+  html: string;
+  initialState: Record<string, unknown>;
+  scripts: Array<{ url?: string }>;
+};
+
 /**
  * Which request categories should be routed through the proxy.
  *

@@ -1,8 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { accessSync, constants } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { fileURLToPath } from "node:url";
 
 export type DynafetchNetRequest = {
   method: string;
@@ -40,6 +42,7 @@ type WorkerSessionOptions = {
   browserProfile?: string;
   timeoutSeconds?: number;
   proxy?: string;
+  rpcTimeoutMs?: number;
 };
 
 type WorkerTransportState = {
@@ -54,26 +57,32 @@ type WorkerTransportState = {
 const sessionStore = new AsyncLocalStorage<{ sessionId: string }>();
 
 let transportPromise: Promise<WorkerTransportState> | null = null;
+const workerDir = path.dirname(fileURLToPath(import.meta.url));
 
 function findPrecompiledBinary(): string | null {
   const platform = process.platform;   // "darwin", "linux", "win32"
-  const arch = process.arch === "x64" ? "x64" : "arm64";
+  const arch =
+    process.arch === "x64"
+      ? "x64"
+      : process.arch === "arm64"
+        ? "arm64"
+        : null;
+  if (!arch) return null;
   const ext = platform === "win32" ? ".exe" : "";
   const name = `dynafetch-net-${platform}-${arch}${ext}`;
 
   // Look relative to this file. After bundling into dist/index.js, binaries
   // are at ../bin/. In development, they're in packages/dynafetch-net/bin/.
   const candidates = [
-    path.resolve(__dirname, "../bin", name),                                    // installed: dist/../bin
-    path.resolve(__dirname, "../../../dynafetch-net/bin", name),                // dev: dynafetch-core/src/net -> dynafetch-net/bin
-    path.resolve(__dirname, "../../../../packages/dynafetch-net/bin", name),    // dev: alt layout
+    path.resolve(workerDir, "../bin", name),                                    // installed: dist/../bin
+    path.resolve(workerDir, "../../../dynafetch-net/bin", name),                // dev: dynafetch-core/src/net -> dynafetch-net/bin
+    path.resolve(workerDir, "../../../../packages/dynafetch-net/bin", name),    // dev: alt layout
     path.resolve(process.cwd(), "packages/dynafetch-net/bin", name),           // dev: from workspace root
   ];
 
   for (const candidate of candidates) {
     try {
-      const fs = require("fs") as typeof import("fs");
-      fs.accessSync(candidate, fs.constants.X_OK);
+      accessSync(candidate, constants.X_OK);
       return candidate;
     } catch {}
   }
@@ -258,6 +267,16 @@ async function callWorker<T>(method: string, params: unknown, timeoutMs = 30_000
   });
 }
 
+function resolveRpcTimeoutMs(options: { rpcTimeoutMs?: number; timeoutSeconds?: number }): number {
+  if (options.rpcTimeoutMs != null) {
+    return Math.max(1, Math.ceil(options.rpcTimeoutMs));
+  }
+  if (options.timeoutSeconds != null) {
+    return Math.max(1_000, Math.ceil(options.timeoutSeconds * 1_000) + 1_000);
+  }
+  return 30_000;
+}
+
 export async function withDynafetchSession<T>(
   options: WorkerSessionOptions,
   run: () => Promise<T>,
@@ -265,7 +284,12 @@ export async function withDynafetchSession<T>(
   const transport = await getWorkerTransport();
   transport.hold(); // Keep child alive for the entire session
 
-  const session = await callWorker<{ sessionId: string }>("openSession", options);
+  const { rpcTimeoutMs, ...sessionOptions } = options;
+  const session = await callWorker<{ sessionId: string }>(
+    "openSession",
+    sessionOptions,
+    resolveRpcTimeoutMs(options),
+  );
 
   try {
     return await sessionStore.run({ sessionId: session.sessionId }, run);
@@ -296,7 +320,7 @@ export async function dynafetchNetFetch(
     browserProfile: options.browserProfile,
     timeoutSeconds: options.timeoutSeconds,
     proxy: options.proxy,
-  });
+  }, resolveRpcTimeoutMs(options));
 }
 
 export async function dynafetchNetBatchFetch(
@@ -316,5 +340,5 @@ export async function dynafetchNetBatchFetch(
     browserProfile: options.browserProfile,
     timeoutSeconds: options.timeoutSeconds,
     proxy: options.proxy,
-  });
+  }, resolveRpcTimeoutMs(options));
 }

@@ -52,7 +52,7 @@ export async function prefetchModuleGraph(
   rootUrls: string[],
   cache: Map<string, string>,
   pageUrl: string,
-  opts?: { maxRounds?: number; proxyUrl?: string },
+  opts?: { maxRounds?: number; proxyUrl?: string; timeoutMs?: number; onWarning?: (warning: string) => void },
 ): Promise<number> {
   const maxRounds = opts?.maxRounds ?? 8;
   const { headers: subHeaders } = chromeSubresourceHeaders(pageUrl);
@@ -101,12 +101,13 @@ export async function prefetchModuleGraph(
       proxy: opts?.proxyUrl,
     }));
 
-    const responses = await phantomBatchFetch(payloads);
+    const responses = await phantomBatchFetch(payloads, { timeoutMs: opts?.timeoutMs });
     const newToScan: string[] = [];
 
     for (let i = 0; i < toFetch.length; i++) {
       const u = toFetch[i];
       const r = responses[i];
+      if (r.warning) opts?.onWarning?.(r.warning);
       if (r.status < 400 && r.body) {
         cache.set(u, r.body);
         totalFetched++;

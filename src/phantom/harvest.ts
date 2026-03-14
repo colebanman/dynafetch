@@ -23,6 +23,8 @@ export interface HarvesterOptions {
   initialCookies?: string[];
   thirdPartyPolicy?: ThirdPartyPolicy;
   proxy?: NormalizedProxy;
+  timeoutMs?: number;
+  deadlineAt?: number;
 }
 
 async function runWithLimit<T>(tasks: Array<() => Promise<T>>, limit: number): Promise<T[]> {
@@ -51,6 +53,9 @@ export class Harvester {
   private thirdPartyPolicy: ThirdPartyPolicy = 'skip-noncritical';
   private prefetchModulePreloads: boolean = true;
   private proxy?: NormalizedProxy;
+  private timeoutMs?: number;
+  private deadlineAt?: number;
+  private warnings = new Set<string>();
 
   constructor(url: string, opts: HarvesterOptions = {}) {
     this.targetUrl = url;
@@ -61,6 +66,8 @@ export class Harvester {
     this.thirdPartyPolicy = opts.thirdPartyPolicy ?? 'skip-noncritical';
     this.prefetchModulePreloads = opts.prefetchModulePreloads !== false;
     this.proxy = opts.proxy;
+    this.timeoutMs = opts.timeoutMs;
+    this.deadlineAt = opts.deadlineAt;
   }
 
   private proxyUrlForScope(scope: 'page' | 'api' | 'assets'): string | undefined {
@@ -78,6 +85,23 @@ export class Harvester {
       }
     }
     return pairs.join('; ');
+  }
+
+  private createTimeoutError(): Error {
+    const timeoutMs = Math.max(1, Math.ceil(this.timeoutMs ?? 1));
+    return new Error(`dynafetch timed out after ${timeoutMs}ms`);
+  }
+
+  private remainingTimeMs(): number | undefined {
+    if (this.deadlineAt == null) return this.timeoutMs;
+    const remaining = this.deadlineAt - Date.now();
+    if (remaining <= 0) throw this.createTimeoutError();
+    return Math.max(1, Math.ceil(remaining));
+  }
+
+  private recordWarning(warning?: string) {
+    if (!warning) return;
+    this.warnings.add(warning);
   }
 
   private async fetchViaProxy(
@@ -112,7 +136,10 @@ export class Harvester {
           proxy: this.proxyUrlForScope(proxyScope),
         };
 
-        const data = await phantomFetch(payload) as ProxyResponse;
+        const data = await phantomFetch(payload, {
+          timeoutMs: this.remainingTimeMs(),
+        }) as ProxyResponse;
+        this.recordWarning(data.warning);
         if (data.error) throw new Error(`Proxy Error: ${data.error}`);
 
         // Collect cookies from every response
@@ -417,12 +444,15 @@ export class Harvester {
     const allPayloads = [...scriptPayloads, ...preloadPayloads];
     if (allPayloads.length > 0) {
       log(`[Harvest] Batch-fetching ${scriptPayloads.length} scripts + ${preloadPayloads.length} modulepreloads...`);
-      const allResponses = await phantomBatchFetch(allPayloads);
+      const allResponses = await phantomBatchFetch(allPayloads, {
+        timeoutMs: this.remainingTimeMs(),
+      });
 
       // Process script responses
       for (let i = 0; i < batchScriptMeta.length; i++) {
         const meta = batchScriptMeta[i];
         const resp = allResponses[i];
+        this.recordWarning(resp.warning);
         const logEntry: NetworkLogEntry = {
           type: 'resource_load',
           url: meta.absoluteUrl,
@@ -454,6 +484,7 @@ export class Harvester {
       for (let i = 0; i < modulePreloadUrls.length; i++) {
         const url = modulePreloadUrls[i];
         const resp = allResponses[batchScriptMeta.length + i];
+        this.recordWarning(resp.warning);
         const logEntry: NetworkLogEntry = {
           type: 'resource_load',
           url,
@@ -531,6 +562,8 @@ export class Harvester {
       const rootUrls = [...moduleEntryUrls, ...modulePreloads.map(mp => mp.url)];
       await prefetchModuleGraph(rootUrls, moduleGraphCache, finalUrl, {
         proxyUrl: this.proxyUrlForScope('assets'),
+        timeoutMs: this.remainingTimeMs(),
+        onWarning: (warning) => this.recordWarning(warning),
       });
     }
 
@@ -546,6 +579,7 @@ export class Harvester {
       headers: response.headers,
       logs: this.logs,
       moduleGraphCache,
+      warnings: Array.from(this.warnings),
     };
   }
 }

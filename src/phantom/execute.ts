@@ -30,6 +30,8 @@ export interface ExecutorOptions {
   moduleWaitMs?: number;
   thirdPartyPolicy?: ThirdPartyPolicy;
   proxy?: NormalizedProxy;
+  timeoutMs?: number;
+  deadlineAt?: number;
 }
 
 type ExecutionError = {
@@ -88,6 +90,9 @@ export class Executor {
   private executionErrors: ExecutionError[] = [];
   private thirdPartyPolicy: ThirdPartyPolicy = 'skip-noncritical';
   private proxy?: NormalizedProxy;
+  private timeoutMs?: number;
+  private deadlineAt?: number;
+  private warnings = new Set<string>();
 
   // Early exit tracking
   private findAll: boolean = false;
@@ -109,6 +114,8 @@ export class Executor {
       this.fuzzyMatch = options.fuzzyMatch ?? true;
       this.thirdPartyPolicy = options.thirdPartyPolicy ?? 'skip-noncritical';
       this.proxy = options.proxy;
+      this.timeoutMs = options.timeoutMs;
+      this.deadlineAt = options.deadlineAt;
       this.applyDefaults(options.quiescence, options.moduleWaitMs);
     }
     
@@ -150,6 +157,30 @@ export class Executor {
   private clampMs(v: number, min: number, max: number): number {
     if (!Number.isFinite(v)) return min;
     return Math.max(min, Math.min(max, Math.trunc(v)));
+  }
+
+  private createTimeoutError(): Error {
+    const timeoutMs = Math.max(1, Math.ceil(this.timeoutMs ?? 1));
+    return new Error(`dynafetch timed out after ${timeoutMs}ms`);
+  }
+
+  private remainingTimeMs(): number | undefined {
+    if (this.deadlineAt == null) return this.timeoutMs;
+    const remaining = this.deadlineAt - Date.now();
+    if (remaining <= 0) throw this.createTimeoutError();
+    return Math.max(1, Math.ceil(remaining));
+  }
+
+  private boundedDurationMs(durationMs: number): number {
+    if (this.deadlineAt == null) return durationMs;
+    const remaining = this.deadlineAt - Date.now();
+    if (remaining <= 0) return 0;
+    return Math.max(0, Math.min(durationMs, Math.ceil(remaining)));
+  }
+
+  private recordWarning(warning?: string) {
+    if (!warning) return;
+    this.warnings.add(warning);
   }
 
   private applyDefaults(quiescence?: QuiescenceOptions, moduleWaitMsOverride?: number) {
@@ -304,7 +335,7 @@ export class Executor {
     const pending = Array.from(this.moduleInFlight.values());
     if (!pending.length) return;
 
-    const timeout = this.clampMs(timeoutMs, 0, 60_000);
+    const timeout = this.clampMs(this.boundedDurationMs(timeoutMs), 0, 60_000);
     if (timeout === 0) return;
 
     const all = Promise.allSettled(pending).then(() => {});
@@ -319,15 +350,19 @@ export class Executor {
     return this.proxy.scopes.has(scope) ? this.proxy.url : undefined;
   }
 
-  private async fetchViaProxy(url: string, method: string, headers: Record<string, string>, body: string, proxyScope: 'api' | 'assets' = 'api'): Promise<ProxyResponse> {
-      try {
-        this.telemetry_proxy++;
-        const payload: ProxyRequest = { method, url, headers, headerOrder: Object.keys(headers), body, proxy: this.proxyUrlForScope(proxyScope) };
-        return await phantomFetch(payload) as ProxyResponse;
-      } catch (e: any) {
-          return { status: 0, body: e.message, headers: {}, error: e.message };
-      }
-  }
+	  private async fetchViaProxy(url: string, method: string, headers: Record<string, string>, body: string, proxyScope: 'api' | 'assets' = 'api'): Promise<ProxyResponse> {
+	      try {
+	        this.telemetry_proxy++;
+	        const payload: ProxyRequest = { method, url, headers, headerOrder: Object.keys(headers), body, proxy: this.proxyUrlForScope(proxyScope) };
+	        const response = await phantomFetch(payload, {
+            timeoutMs: this.remainingTimeMs(),
+          }) as ProxyResponse;
+          this.recordWarning(response.warning);
+	        return response;
+	      } catch (e: any) {
+	          return { status: 0, body: e.message, headers: {}, error: e.message };
+	      }
+	  }
 
   private rewriteImportMeta(source: string, moduleUrl: string): string {
     const importMetaLiteral = `({ url: ${JSON.stringify(moduleUrl)}, env: { MODE: "production", PROD: true, DEV: false, SSR: false, BASE_URL: "/" }, hot: undefined })`;
@@ -471,7 +506,7 @@ export class Executor {
     if (existing) return existing;
 
 	    const p = (async () => {
-	      const taskId = this.trackTaskStart('module_bundle', cacheKey, this.moduleWaitMs);
+		      const taskId = this.trackTaskStart('module_bundle', cacheKey, this.boundedDurationMs(this.moduleWaitMs));
 	      try {
 	        if (process.env.PHANTOM_DEBUG_MODULES === '1') {
 	          log('[Executor] Bundling module entry:', cacheKey);
@@ -1465,13 +1500,14 @@ export class Executor {
 	    this.windowClosed = true;
 	    try { window.close(); } catch {}
 
-    const result: ExecutionResult = {
-      logs: this.logs,
-      matchedRequests: this.earlyMatches,
-      renderedHtml,
-      timings: { ...this.timings },
-      errors: this.executionErrors.length ? this.executionErrors : undefined,
-    };
+	    const result: ExecutionResult = {
+	      logs: this.logs,
+	      matchedRequests: this.earlyMatches,
+	      renderedHtml,
+	      timings: { ...this.timings },
+	      errors: this.executionErrors.length ? this.executionErrors : undefined,
+        warnings: Array.from(this.warnings),
+	    };
 
     // Give any just-scheduled microtasks/timers a brief window to run while our process-level
     // error handlers are still installed, so they get recorded instead of crashing the process.

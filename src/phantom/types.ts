@@ -21,6 +21,7 @@ export interface HarvestResult {
   headers: Record<string, string>; // Initial response headers
   logs: NetworkLogEntry[];
   moduleGraphCache?: Map<string, string>; // Pre-warmed module source cache
+  warnings?: string[];
 }
 
 export interface NetworkLogEntry {
@@ -52,4 +53,5 @@ export interface ExecutionResult {
     quiescence_ms: number;
   };
   errors?: ExecutionError[];
+  warnings?: string[];
 }

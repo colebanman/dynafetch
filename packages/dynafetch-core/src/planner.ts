@@ -1,9 +1,8 @@
-import type { HarvestResult } from "../../../src/phantom/types.ts";
-import type { DynafetchFramework, DynafetchPlan } from "./types";
+import type { DynafetchFramework, DynafetchHarvestSnapshot, DynafetchPlan } from "./types";
 
 export function planDynafetch(
   framework: DynafetchFramework,
-  harvest: HarvestResult,
+  harvest: DynafetchHarvestSnapshot,
   allowJsdomFallback: boolean,
 ): DynafetchPlan {
   if (framework === "static" && harvest.scripts.length === 0) {

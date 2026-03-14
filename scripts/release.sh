@@ -19,6 +19,12 @@ if [[ "$BUMP" != "patch" && "$BUMP" != "minor" && "$BUMP" != "major" ]]; then
   exit 1
 fi
 
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "Release requires a clean git working tree."
+  echo "Commit or stash existing changes, then rerun the release."
+  exit 1
+fi
+
 # Get current version from root package.json
 CURRENT=$(node -p "require('./package.json').version")
 echo "Current version: $CURRENT"
@@ -33,8 +39,8 @@ esac
 NEW_VERSION="$MAJOR.$MINOR.$PATCH"
 echo "New version: $NEW_VERSION"
 
-# Update all package.json files
-for f in package.json packages/dynafetch/package.json packages/dynafetch-core/package.json; do
+# Update releasable package.json files
+for f in package.json packages/dynafetch/package.json; do
   node -e "
     const fs = require('fs');
     const pkg = JSON.parse(fs.readFileSync('$f', 'utf8'));
@@ -53,7 +59,7 @@ echo "Running type check..."
 npx tsc --noEmit
 
 # Git commit, tag, push
-git add -A
+git add package.json packages/dynafetch/package.json packages/dynafetch/dist packages/dynafetch/bin
 git commit -m "v$NEW_VERSION"
 git tag "v$NEW_VERSION"
 git push origin main --tags
