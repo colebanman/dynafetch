@@ -119,7 +119,7 @@ const page = await dynafetch({
 |-|-|-|
 | `minWaitMs` | `75` | Minimum ms before checking idle state |
 | `idleWaitMs` | `100` | Ms of zero pending requests to consider settled |
-| `maxWaitMs` | `2000` | Hard cap on wait time |
+| `maxWaitMs` | `3000` | Hard cap on wait time |
 | `moduleWaitMs` | `6000` | Max wait for ES module bundling |
 | `timeoutMs` | none | Overall operation timeout |
 

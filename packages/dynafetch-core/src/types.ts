@@ -147,7 +147,7 @@ export type DynafetchOptions = {
   /**
    * Hard upper bound (ms) on how long to wait for the page to settle.
    * After this, results are returned regardless of pending activity.
-   * @default 2000
+   * @default 3000
    */
   maxWaitMs?: number;
 

@@ -222,7 +222,7 @@ async function withOperationTimeout<T>(operation: Promise<T>, timeoutMs?: number
  * | `proxy` | none | `"http://user:pass@ip:port"` or `{ url, only: ["page","api","assets"] }` |
  * | `minWaitMs` | `75` | Min ms before checking if page is idle |
  * | `idleWaitMs` | `100` | Ms of zero pending requests = settled |
- * | `maxWaitMs` | `2000` | Hard cap on wait time regardless of activity |
+ * | `maxWaitMs` | `3000` | Hard cap on wait time regardless of activity |
  * | `moduleWaitMs` | `6000` | Max ms for ES module bundling (esbuild) |
  * | `timeoutMs` | none | Overall timeout for the entire operation |
  * | `thirdPartyPolicy` | `"skip-noncritical"` | Skip analytics/ads/chat scripts |

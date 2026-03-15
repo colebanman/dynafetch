@@ -107,6 +107,8 @@ export class Executor {
   private originalGlobalMessageChannel: any = undefined;
   private originalGlobalMessagePort: any = undefined;
   private activeTimerHandles = new Set<any>();
+  private domMutationVersion: number = 0;
+  private domMutationObserver: any = null;
 
   // Simple telemetry counters (useful for debugging).
   private telemetry_stubbed = 0;
@@ -239,6 +241,33 @@ export class Executor {
     this.activeTimerHandles.clear();
   }
 
+  private noteDomMutation() {
+    this.domMutationVersion++;
+  }
+
+  private async waitForDomSettle(window: any): Promise<void> {
+    const quietMs = this.clampMs(
+      Number(process.env.PHANTOM_DOM_SETTLE_MS ?? Math.max(this.quiescenceOptions.idleWaitMs * 4, 400)),
+      50,
+      5_000,
+    );
+    const maxMs = this.clampMs(
+      Number(process.env.PHANTOM_DOM_SETTLE_MAX_MS ?? Math.max(quietMs * 4, 2_000)),
+      quietMs,
+      10_000,
+    );
+
+    const start = Date.now();
+    let seenVersion = this.domMutationVersion;
+
+    while (!this.windowClosed) {
+      await new Promise((resolve) => setTimeout(resolve, quietMs));
+      if (this.domMutationVersion === seenVersion) return;
+      seenVersion = this.domMutationVersion;
+      if ((Date.now() - start) >= maxMs) return;
+    }
+  }
+
   private async performAutoScroll(window: any): Promise<boolean> {
     const steps = this.clampMs(Number(process.env.PHANTOM_AUTO_SCROLL_STEPS ?? 3), 0, 12);
     if (steps === 0) return false;
@@ -288,7 +317,7 @@ export class Executor {
 
     const minWaitMs = this.clampMs(quiescence?.minWaitMs ?? 75, 0, 10_000);
     const idleWaitMs = this.clampMs(quiescence?.idleWaitMs ?? 100, 0, 10_000);
-    const maxWaitMs = this.clampMs(quiescence?.maxWaitMs ?? 2000, 0, hardMaxCap);
+    const maxWaitMs = this.clampMs(quiescence?.maxWaitMs ?? 3000, 0, hardMaxCap);
 
     const hardModuleCap = this.clampMs(Number(process.env.PHANTOM_MODULE_WAIT_MAX_CAP_MS ?? 30000), 1000, 120_000);
     this.moduleWaitMs = this.clampMs(Number(process.env.PHANTOM_MODULE_WAIT_MS ?? moduleWaitMsOverride ?? 6000), 1000, hardModuleCap);
@@ -1672,6 +1701,22 @@ export class Executor {
     });
 
     const { window } = dom;
+    this.domMutationVersion = 0;
+    try {
+      const MutationObserverCtor = (window as any).MutationObserver;
+      const targetNode = window.document?.documentElement || window.document?.body;
+      if (MutationObserverCtor && targetNode) {
+        this.domMutationObserver = new MutationObserverCtor(() => {
+          this.noteDomMutation();
+        });
+        this.domMutationObserver.observe(targetNode, {
+          subtree: true,
+          childList: true,
+          characterData: true,
+          attributes: true,
+        });
+      }
+    } catch {}
     let readyStateValue: 'loading' | 'interactive' | 'complete' = 'loading';
     try {
       Object.defineProperty(window.document, 'readyState', {
@@ -1836,6 +1881,12 @@ export class Executor {
         }
       }
 
+      try {
+        await this.waitForDomSettle(window);
+      } catch (e) {
+        warn('[Executor] DOM settle wait failed:', e);
+      }
+
 	      const renderedHtml = this.serializeDocument(window);
 
 		    // Mark execution complete so any late dynamic loaders skip eval work.
@@ -1864,6 +1915,10 @@ export class Executor {
 	    return result;
 
 	    } finally {
+        try {
+          this.domMutationObserver?.disconnect?.();
+        } catch {}
+        this.domMutationObserver = null;
         const g: any = globalThis as any;
         if (this.originalGlobalMessageChannel !== undefined) {
           g.MessageChannel = this.originalGlobalMessageChannel;
