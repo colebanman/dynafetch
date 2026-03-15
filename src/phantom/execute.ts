@@ -239,6 +239,50 @@ export class Executor {
     this.activeTimerHandles.clear();
   }
 
+  private async performAutoScroll(window: any): Promise<boolean> {
+    const steps = this.clampMs(Number(process.env.PHANTOM_AUTO_SCROLL_STEPS ?? 3), 0, 12);
+    if (steps === 0) return false;
+
+    const stepPx = this.clampMs(
+      Number(process.env.PHANTOM_AUTO_SCROLL_STEP_PX ?? Math.max(Number(window.innerHeight) || 0, 900)),
+      100,
+      10_000,
+    );
+    const delayMs = this.clampMs(Number(process.env.PHANTOM_AUTO_SCROLL_DELAY_MS ?? 150), 0, 5_000);
+
+    const dispatchScroll = () => {
+      try { window.dispatchEvent(new window.Event('scroll')); } catch {}
+      try { window.document?.dispatchEvent?.(new window.Event('scroll')); } catch {}
+      try { window.document?.documentElement?.dispatchEvent?.(new window.Event('scroll')); } catch {}
+    };
+
+    let didScroll = false;
+    for (let step = 0; step < steps && !this.windowClosed; step++) {
+      const nextY = (Number(window.scrollY) || 0) + stepPx;
+      try {
+        window.scrollTo(0, nextY);
+      } catch {
+        try { window.scrollY = nextY; } catch {}
+      }
+      dispatchScroll();
+      didScroll = true;
+      if (delayMs > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+      }
+    }
+
+    if (didScroll) {
+      try {
+        window.scrollTo(0, 0);
+      } catch {
+        try { window.scrollY = 0; } catch {}
+      }
+      dispatchScroll();
+    }
+
+    return didScroll;
+  }
+
   private applyDefaults(quiescence?: QuiescenceOptions, moduleWaitMsOverride?: number) {
     const hardMaxCap = this.clampMs(Number(process.env.PHANTOM_QUIESCENCE_MAX_CAP_MS ?? 8000), 500, 60_000);
 
@@ -913,9 +957,10 @@ export class Executor {
 
     // crypto.getRandomValues for UUIDs/nonces.
     if (!window.crypto) window.crypto = {};
+    const nodeWebCrypto: any = g.crypto || (nodeCrypto as any).webcrypto;
     if (!window.crypto.getRandomValues) {
-      if (g.crypto && typeof g.crypto.getRandomValues === 'function') {
-        window.crypto.getRandomValues = g.crypto.getRandomValues.bind(g.crypto);
+      if (nodeWebCrypto && typeof nodeWebCrypto.getRandomValues === 'function') {
+        window.crypto.getRandomValues = nodeWebCrypto.getRandomValues.bind(nodeWebCrypto);
       } else {
         window.crypto.getRandomValues = (arr: Uint8Array) => {
           const buf = nodeCrypto.randomBytes(arr.length);
@@ -923,6 +968,22 @@ export class Executor {
           return arr;
         };
       }
+    }
+    if (!window.crypto.subtle && nodeWebCrypto?.subtle) {
+      window.crypto.subtle = nodeWebCrypto.subtle;
+    }
+    if (!window.crypto.randomUUID) {
+      if (typeof nodeWebCrypto?.randomUUID === 'function') {
+        window.crypto.randomUUID = nodeWebCrypto.randomUUID.bind(nodeWebCrypto);
+      } else {
+        window.crypto.randomUUID = () => nodeCrypto.randomUUID();
+      }
+    }
+    if (!(window as any).CryptoKey && g.CryptoKey) {
+      (window as any).CryptoKey = g.CryptoKey;
+    }
+    if (!(window as any).SubtleCrypto && g.SubtleCrypto) {
+      (window as any).SubtleCrypto = g.SubtleCrypto;
     }
 
     // MessageChannel is used by React schedulers, streaming components, etc.
@@ -1008,6 +1069,95 @@ export class Executor {
         availHeight: 900,
       };
     }
+
+    const parsePx = (value: any): number => {
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      if (typeof value === 'string') {
+        const parsed = Number.parseFloat(value.replace(/px$/i, ''));
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return 0;
+    };
+
+    const fallbackViewportHeight = Math.max(Number(window.innerHeight) || 0, 900);
+    const fallbackViewportWidth = Math.max(Number(window.innerWidth) || 0, 1440);
+    const fallbackDocumentHeight = Math.max(fallbackViewportHeight * 6, 5400);
+
+    const makeRect = (width: number, height: number) => ({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      bottom: height,
+      right: width,
+      width,
+      height,
+      toJSON() {
+        return { x: 0, y: 0, top: 0, left: 0, bottom: height, right: width, width, height };
+      },
+    });
+
+    const computeElementBox = (el: any) => {
+      const tag = String(el?.tagName || '').toLowerCase();
+      if (tag === 'html' || tag === 'body') {
+        return {
+          width: fallbackViewportWidth,
+          height: fallbackDocumentHeight,
+        };
+      }
+
+      const width =
+        parsePx(el?.style?.width) ||
+        parsePx(el?.getAttribute?.('width')) ||
+        fallbackViewportWidth;
+      const height =
+        parsePx(el?.style?.height) ||
+        parsePx(el?.getAttribute?.('height')) ||
+        240;
+
+      return { width, height };
+    };
+
+    try {
+      const elementProto = window.Element?.prototype;
+      if (elementProto) {
+        const originalGetBoundingClientRect = elementProto.getBoundingClientRect;
+        elementProto.getBoundingClientRect = function(this: any) {
+          try {
+            const rect = originalGetBoundingClientRect?.call(this);
+            if (rect && (rect.width > 0 || rect.height > 0)) return rect;
+          } catch {}
+
+          const { width, height } = computeElementBox(this);
+          return makeRect(width, height);
+        };
+      }
+
+      const htmlEl = window.document?.documentElement;
+      const bodyEl = window.document?.body;
+      const defineSize = (target: any, name: string, value: number) => {
+        try {
+          Object.defineProperty(target, name, {
+            configurable: true,
+            get: () => value,
+          });
+        } catch {}
+      };
+
+      if (htmlEl) {
+        defineSize(htmlEl, 'clientWidth', fallbackViewportWidth);
+        defineSize(htmlEl, 'clientHeight', fallbackViewportHeight);
+        defineSize(htmlEl, 'scrollWidth', fallbackViewportWidth);
+        defineSize(htmlEl, 'scrollHeight', fallbackDocumentHeight);
+      }
+      if (bodyEl) {
+        defineSize(bodyEl, 'clientWidth', fallbackViewportWidth);
+        defineSize(bodyEl, 'clientHeight', fallbackViewportHeight);
+        defineSize(bodyEl, 'scrollWidth', fallbackViewportWidth);
+        defineSize(bodyEl, 'scrollHeight', fallbackDocumentHeight);
+      }
+    } catch {}
+
     if (!window.visualViewport) {
       window.visualViewport = {
         width: window.innerWidth,
@@ -1665,9 +1815,26 @@ export class Executor {
 	    } catch (e) {
         warn('[Executor] Quiescence wait failed:', e);
     }
-    this.timings.quiescence_ms = Date.now() - quiescenceStart;
-    const reason = this.matchFound && !this.findAll ? '(early exit on match)' : '';
+	    this.timings.quiescence_ms = Date.now() - quiescenceStart;
+	    const reason = this.matchFound && !this.findAll ? '(early exit on match)' : '';
 	    log(`[Executor] Quiescence reached in ${Date.now() - quiescenceStart}ms ${reason}`);
+
+      if (!this.matchFound || this.findAll) {
+        const didScroll = await this.performAutoScroll(window);
+        if (didScroll) {
+          if (this.moduleInFlight.size > 0) {
+            await this.waitForModuleWork(this.moduleWaitMs);
+          }
+          log('[Executor] Waiting for post-scroll quiescence...');
+          const postScrollStart = Date.now();
+          try {
+            await this.waitForQuiescence();
+          } catch (e) {
+            warn('[Executor] Post-scroll quiescence wait failed:', e);
+          }
+          this.timings.quiescence_ms += Date.now() - postScrollStart;
+        }
+      }
 
 	      const renderedHtml = this.serializeDocument(window);
 

@@ -87,8 +87,20 @@ const TELEMETRY_INLINE_PATTERNS = [
   /\bhj\s*\(/i,
   /\bnewrelic\b/i,
   /\bdatadog\b/i,
-  /\bSentry\b/i,
-  /\bLogRocket\b/i,
+  /\bSentry\.(?:init|capture|captureException|configureScope|withScope)\b/i,
+  /\bLogRocket\.(?:init|identify|track)\b/i,
+];
+
+const INLINE_APPLICATION_PATTERNS = [
+  /\bwebpackChunk\w*/i,
+  /\b__webpack_require__\b/i,
+  /\b__SCRIPTS_LOADED__\b/i,
+  /\b__LOADABLE_LOADED_CHUNKS__\b/i,
+  /\bparcelRequire\b/i,
+  /\bwindow\.__[A-Z0-9_]{3,}\s*=/i,
+  /\bglobalThis\.__[A-Z0-9_]{3,}\s*=/i,
+  /\bself\.__[A-Z0-9_]{3,}\s*=/i,
+  /\bperformance\.mark\s*\(/i,
 ];
 
 function hostnameOf(url: string): string {
@@ -137,6 +149,7 @@ export function classifyScriptAsset(script: Pick<ScriptAsset, 'url' | 'content' 
     return 'unknown';
   }
 
+  if (matchesAny(content, INLINE_APPLICATION_PATTERNS)) return 'application';
   if (matchesAny(content, TELEMETRY_INLINE_PATTERNS)) return 'telemetry';
   return 'application';
 }
