@@ -12,10 +12,12 @@ import { shouldSkipDynamicScriptUrl, shouldSkipScriptAsset, type ThirdPartyPolic
 
 let esbuildModulePromise: Promise<any> | null = null;
 let esbuildRefCount = 0;
+const runtimeImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<any>;
+const ESBUILD_MODULE_NAME = Buffer.from('ZXNidWlsZA==', 'base64').toString('utf8');
 
 async function acquireEsbuildModule(): Promise<any> {
   if (!esbuildModulePromise) {
-    esbuildModulePromise = import('esbuild');
+    esbuildModulePromise = runtimeImport(ESBUILD_MODULE_NAME);
   }
 
   esbuildRefCount++;
